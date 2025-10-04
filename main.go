@@ -4,6 +4,8 @@ import (
 	_ "embed"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/ebitengine/purego"
@@ -26,11 +28,14 @@ var (
 	currentOSAssertionID IOPMAssertionID
 	isEnabled            bool
 
-	//go:embed icon/on.png
+	//go:embed resources/on.png
 	enabledIcon []byte
 
-	//go:embed icon/off.png
+	//go:embed resources/off.png
 	disabledIcon []byte
+
+	//go:embed resources/vigilo.plist
+	plist []byte
 )
 
 const (
@@ -104,6 +109,16 @@ func onReady() {
 	systray.SetTooltip("")
 
 	mToggle := systray.AddMenuItem("Disable", "")
+	homeDir, _ := os.UserHomeDir()
+
+	var startOnStartupTitle string
+	if _, err := os.Stat(filepath.Join(homeDir, "Library", "LaunchAgents", "com.angluster.vigilo.plist")); err == nil {
+		startOnStartupTitle = "✓ Start on Startup"
+	} else {
+		startOnStartupTitle = "Start on Startup"
+	}
+
+	mStartOnStartup := systray.AddMenuItem(startOnStartupTitle, "")
 	mQuit := systray.AddMenuItem("Quit", "")
 
 	enableAssertion()
@@ -126,7 +141,15 @@ func onReady() {
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
+			case <-mStartOnStartup.ClickedCh:
+				isOn := toggleStartOnStartup()
+				if isOn {
+					mStartOnStartup.SetTitle("✓ Start on Startup")
+				} else {
+					mStartOnStartup.SetTitle("Start on Startup")
+				}
 			}
+
 		}
 	}()
 }
@@ -137,8 +160,57 @@ func onExit() {
 	}
 }
 
+func toggleStartOnStartup() bool {
+	homeDir, _ := os.UserHomeDir()
+
+	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.angluster.vigilo.plist")
+
+	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
+		execPath, err := os.Executable()
+		if err != nil {
+			return false
+		}
+
+		plistContent := strings.Replace(string(plist), "%EXEC_LOCATION%", execPath, -1)
+
+		os.MkdirAll(filepath.Dir(plistPath), 0755)
+		if err := os.WriteFile(plistPath, []byte(plistContent), 0644); err != nil {
+			return false
+		}
+
+		exec.Command("launchctl", "load", plistPath).Run()
+		return true
+	} else {
+		exec.Command("launchctl", "unload", plistPath).Run()
+		os.Remove(plistPath)
+		return false
+	}
+}
+
+func acquireLock() (*os.File, bool) {
+	lockPath := filepath.Join(os.TempDir(), "vigilo.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, false
+	}
+
+	err = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != nil {
+		lockFile.Close()
+		return nil, false
+	}
+
+	return lockFile, true
+}
+
 func main() {
 	if syscall.Getppid() == 1 {
+		lockFile, acquired := acquireLock()
+		if !acquired {
+			os.Exit(0)
+		}
+		defer lockFile.Close()
+
 		systray.Run(onReady, onExit)
 	} else {
 		cmd := exec.Command(os.Args[0])
