@@ -8,9 +8,14 @@ A lightweight macOS menu bar application that prevents your Mac from sleeping.
 - Prevents system sleep
 - Simple toggle interface
 - Visual status indicator in menu bar
+- Start on startup option
 - Minimal resource usage
 
 ## Installation
+
+```bash
+go install github.com/ranglust/vigilo@latest
+```
 
 ### Build from source
 
@@ -32,6 +37,7 @@ The application will appear in your menu bar.
 2. Click "Disable" to turn off sleep prevention
 3. Click "Enable" to turn it back on
 4. The icon shows "ON" or "OFF" to indicate current state
+5. Click "Start on Startup" to automatically launch Vigilo when you log in
 
 The application starts enabled by default.
 
