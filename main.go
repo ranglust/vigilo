@@ -181,7 +181,6 @@ func toggleStartOnStartup() bool {
 		exec.Command("launchctl", "load", plistPath).Run()
 		return true
 	} else {
-		exec.Command("launchctl", "unload", plistPath).Run()
 		os.Remove(plistPath)
 		return false
 	}
