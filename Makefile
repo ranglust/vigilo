@@ -14,8 +14,9 @@ clean:
 	rm -f $(BINARY_NAME)
 
 install: build
-	cp $(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
-	chmod +x $(INSTALL_PATH)/$(BINARY_NAME)
+	ln -s ./vigilo ${INSTALL_PATH}/${BINARY_NAME}
+#	cp $(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
+#	chmod +x $(INSTALL_PATH)/$(BINARY_NAME)
 
 uninstall:
 	rm -f $(INSTALL_PATH)/$(BINARY_NAME)
