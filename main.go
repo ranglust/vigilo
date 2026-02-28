@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	_ "embed"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,11 +44,40 @@ var (
 const (
 	kCFStringEncodingUTF8 = 0x08000100
 	kIOPMAssertionLevelOn = 255
+	socketPath            = "/tmp/vigilo.sock"
 )
 
 func cfstr(s string) CFStringRef {
 	cs := append([]byte(s), 0)
 	return CFStringCreateWithCString(0, &cs[0], kCFStringEncodingUTF8)
+}
+
+func hideFromDock() {
+	objc, _ := purego.Dlopen("/usr/lib/libobjc.A.dylib", purego.RTLD_NOW)
+	purego.Dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", purego.RTLD_NOW)
+
+	getClassSym, _ := purego.Dlsym(objc, "objc_getClass")
+	selRegSym, _ := purego.Dlsym(objc, "sel_registerName")
+	msgSendSym, _ := purego.Dlsym(objc, "objc_msgSend")
+
+	var objcGetClass func(name *byte) uintptr
+	purego.RegisterFunc(&objcGetClass, getClassSym)
+
+	var selRegisterName func(name *byte) uintptr
+	purego.RegisterFunc(&selRegisterName, selRegSym)
+
+	var msgSend func(id uintptr, sel uintptr) uintptr
+	purego.RegisterFunc(&msgSend, msgSendSym)
+
+	var msgSendInt func(id uintptr, sel uintptr, arg uintptr) uintptr
+	purego.RegisterFunc(&msgSendInt, msgSendSym)
+
+	cls := append([]byte("NSApplication"), 0)
+	sel1 := append([]byte("sharedApplication"), 0)
+	sel2 := append([]byte("setActivationPolicy:"), 0)
+
+	nsApp := msgSend(objcGetClass(&cls[0]), selRegisterName(&sel1[0]))
+	msgSendInt(nsApp, selRegisterName(&sel2[0]), 1) // NSApplicationActivationPolicyAccessory
 }
 
 func initIOKit() {
@@ -101,6 +133,96 @@ func disableAssertion() {
 	isEnabled = false
 }
 
+func setSleepPrevention(on bool, mToggle *systray.MenuItem) {
+	if on {
+		enableAssertion()
+		systray.SetIcon(enabledIcon)
+		systray.SetTitle("ON")
+		mToggle.SetTitle("Disable")
+	} else {
+		disableAssertion()
+		systray.SetIcon(disabledIcon)
+		systray.SetTitle("OFF")
+		mToggle.SetTitle("Enable")
+	}
+}
+
+func setStartOnStartup(on bool, mStartOnStartup *systray.MenuItem) {
+	homeDir, _ := os.UserHomeDir()
+	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.angluster.vigilo.plist")
+
+	if on {
+		execPath, err := os.Executable()
+		if err != nil {
+			return
+		}
+		plistContent := strings.Replace(string(plist), "%EXEC_LOCATION%", execPath, -1)
+		os.MkdirAll(filepath.Dir(plistPath), 0755)
+		os.WriteFile(plistPath, []byte(plistContent), 0644)
+		mStartOnStartup.SetTitle("✓ Start on Startup")
+	} else {
+		os.Remove(plistPath)
+		mStartOnStartup.SetTitle("Start on Startup")
+	}
+}
+
+func isStartOnStartupEnabled() bool {
+	homeDir, _ := os.UserHomeDir()
+	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.angluster.vigilo.plist")
+	_, err := os.Stat(plistPath)
+	return err == nil
+}
+
+func startCommandListener(mToggle, mStartOnStartup *systray.MenuItem) {
+	os.Remove(socketPath)
+
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		return
+	}
+
+	go func() {
+		defer listener.Close()
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+			go handleConnection(conn, mToggle, mStartOnStartup)
+		}
+	}()
+}
+
+func handleConnection(conn *net.UnixConn, mToggle, mStartOnStartup *systray.MenuItem) {
+	defer conn.Close()
+
+	scanner := bufio.NewScanner(conn)
+	if !scanner.Scan() {
+		return
+	}
+	cmd := strings.TrimSpace(scanner.Text())
+
+	var response string
+	switch cmd {
+	case "on":
+		setSleepPrevention(true, mToggle)
+		response = "sleep prevention enabled"
+	case "off":
+		setSleepPrevention(false, mToggle)
+		response = "sleep prevention disabled"
+	case "enable":
+		setStartOnStartup(true, mStartOnStartup)
+		response = "start on startup enabled"
+	case "disable":
+		setStartOnStartup(false, mStartOnStartup)
+		response = "start on startup disabled"
+	default:
+		response = "unknown command: " + cmd
+	}
+
+	fmt.Fprintln(conn, response)
+}
+
 func onReady() {
 	initIOKit()
 
@@ -109,10 +231,9 @@ func onReady() {
 	systray.SetTooltip("")
 
 	mToggle := systray.AddMenuItem("Disable", "")
-	homeDir, _ := os.UserHomeDir()
 
 	var startOnStartupTitle string
-	if _, err := os.Stat(filepath.Join(homeDir, "Library", "LaunchAgents", "com.angluster.vigilo.plist")); err == nil {
+	if isStartOnStartupEnabled() {
 		startOnStartupTitle = "✓ Start on Startup"
 	} else {
 		startOnStartupTitle = "Start on Startup"
@@ -122,67 +243,43 @@ func onReady() {
 	mQuit := systray.AddMenuItem("Quit", "")
 
 	enableAssertion()
+	startCommandListener(mToggle, mStartOnStartup)
 
 	go func() {
 		for {
 			select {
 			case <-mToggle.ClickedCh:
-				if isEnabled {
-					disableAssertion()
-					systray.SetIcon(disabledIcon)
-					systray.SetTitle("OFF")
-					mToggle.SetTitle("Enable")
-				} else {
-					enableAssertion()
-					systray.SetIcon(enabledIcon)
-					systray.SetTitle("ON")
-					mToggle.SetTitle("Disable")
-				}
+				setSleepPrevention(!isEnabled, mToggle)
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
 			case <-mStartOnStartup.ClickedCh:
-				isOn := toggleStartOnStartup()
-				if isOn {
-					mStartOnStartup.SetTitle("✓ Start on Startup")
-				} else {
-					mStartOnStartup.SetTitle("Start on Startup")
-				}
+				setStartOnStartup(!isStartOnStartupEnabled(), mStartOnStartup)
 			}
-
 		}
 	}()
 }
 
 func onExit() {
+	os.Remove(socketPath)
 	if isEnabled {
 		disableAssertion()
 	}
 }
 
-func toggleStartOnStartup() bool {
-	homeDir, _ := os.UserHomeDir()
+func sendCommand(cmd string) {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "vigilo is not running")
+		os.Exit(1)
+	}
+	defer conn.Close()
 
-	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.angluster.vigilo.plist")
+	fmt.Fprintln(conn, cmd)
 
-	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
-		execPath, err := os.Executable()
-		if err != nil {
-			return false
-		}
-
-		plistContent := strings.Replace(string(plist), "%EXEC_LOCATION%", execPath, -1)
-
-		os.MkdirAll(filepath.Dir(plistPath), 0755)
-		if err := os.WriteFile(plistPath, []byte(plistContent), 0644); err != nil {
-			return false
-		}
-
-		exec.Command("launchctl", "load", plistPath).Run()
-		return true
-	} else {
-		os.Remove(plistPath)
-		return false
+	scanner := bufio.NewScanner(conn)
+	if scanner.Scan() {
+		fmt.Println(scanner.Text())
 	}
 }
 
@@ -202,17 +299,50 @@ func acquireLock() (*os.File, bool) {
 	return lockFile, true
 }
 
+func printUsage() {
+	fmt.Println(`Usage: vigilo <command>
+
+Commands:
+  serve     Start the daemon (menu bar + socket listener)
+  on        Enable sleep prevention
+  off       Disable sleep prevention
+  enable    Enable start on startup
+  disable   Disable start on startup`)
+}
+
 func main() {
-	if syscall.Getppid() == 1 {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(0)
+	}
+
+	switch os.Args[1] {
+	case "serve":
+		if syscall.Getppid() != 1 {
+			exe, err := os.Executable()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "failed to find executable:", err)
+				os.Exit(1)
+			}
+			cmd := exec.Command(exe, "serve")
+			if err := cmd.Start(); err != nil {
+				fmt.Fprintln(os.Stderr, "failed to start daemon:", err)
+				os.Exit(1)
+			}
+			return
+		}
 		lockFile, acquired := acquireLock()
 		if !acquired {
-			os.Exit(0)
+			fmt.Fprintln(os.Stderr, "another instance is already running")
+			os.Exit(1)
 		}
 		defer lockFile.Close()
-
+		hideFromDock()
 		systray.Run(onReady, onExit)
-	} else {
-		cmd := exec.Command(os.Args[0])
-		cmd.Start()
+	case "on", "off", "enable", "disable":
+		sendCommand(os.Args[1])
+	default:
+		printUsage()
+		os.Exit(1)
 	}
 }

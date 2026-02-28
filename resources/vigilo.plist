@@ -7,6 +7,7 @@
     <key>ProgramArguments</key>
     <array>
       <string>%EXEC_LOCATION%</string>
+      <string>serve</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
