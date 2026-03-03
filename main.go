@@ -216,6 +216,21 @@ func handleConnection(conn *net.UnixConn, mToggle, mStartOnStartup *systray.Menu
 	case "disable":
 		setStartOnStartup(false, mStartOnStartup)
 		response = "start on startup disabled"
+	case "status":
+		sleepStatus := "off"
+		if isEnabled {
+			sleepStatus = "on"
+		}
+		startupStatus := "disabled"
+		if isStartOnStartupEnabled() {
+			startupStatus = "enabled"
+		}
+		response = fmt.Sprintf("sleep prevention: %s\nstart on startup: %s", sleepStatus, startupStatus)
+	case "stop":
+		fmt.Fprintln(conn, "daemon stopped")
+		conn.Close()
+		systray.Quit()
+		return
 	default:
 		response = "unknown command: " + cmd
 	}
@@ -278,7 +293,7 @@ func sendCommand(cmd string) {
 	fmt.Fprintln(conn, cmd)
 
 	scanner := bufio.NewScanner(conn)
-	if scanner.Scan() {
+	for scanner.Scan() {
 		fmt.Println(scanner.Text())
 	}
 }
@@ -307,7 +322,9 @@ Commands:
   on        Enable sleep prevention
   off       Disable sleep prevention
   enable    Enable start on startup
-  disable   Disable start on startup`)
+  disable   Disable start on startup
+  status    Show current status
+  stop      Stop the daemon`)
 }
 
 func main() {
@@ -339,7 +356,7 @@ func main() {
 		defer lockFile.Close()
 		hideFromDock()
 		systray.Run(onReady, onExit)
-	case "on", "off", "enable", "disable":
+	case "on", "off", "enable", "disable", "status", "stop":
 		sendCommand(os.Args[1])
 	default:
 		printUsage()
