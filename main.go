@@ -173,6 +173,16 @@ func isStartOnStartupEnabled() bool {
 	return err == nil
 }
 
+func stopDaemon() {
+	homeDir, _ := os.UserHomeDir()
+	plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.angluster.vigilo.plist")
+	if _, err := os.Stat(plistPath); err == nil {
+		exec.Command("launchctl", "unload", plistPath).Run()
+		// launchctl unload sends SIGTERM; if we're still here, fall through
+	}
+	systray.Quit()
+}
+
 func startCommandListener(mToggle, mStartOnStartup *systray.MenuItem) {
 	os.Remove(socketPath)
 
@@ -229,7 +239,7 @@ func handleConnection(conn *net.UnixConn, mToggle, mStartOnStartup *systray.Menu
 	case "stop":
 		fmt.Fprintln(conn, "daemon stopped")
 		conn.Close()
-		systray.Quit()
+		stopDaemon()
 		return
 	default:
 		response = "unknown command: " + cmd
@@ -266,7 +276,7 @@ func onReady() {
 			case <-mToggle.ClickedCh:
 				setSleepPrevention(!isEnabled, mToggle)
 			case <-mQuit.ClickedCh:
-				systray.Quit()
+				stopDaemon()
 				return
 			case <-mStartOnStartup.ClickedCh:
 				setStartOnStartup(!isStartOnStartupEnabled(), mStartOnStartup)
